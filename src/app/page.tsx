@@ -14,7 +14,7 @@ import { NewTaskModal } from '@/components/NewTaskModal';
 import { AddLeaveModal } from '@/components/AddLeaveModal';
 import { PasswordGate } from '@/components/PasswordGate';
 import initialTasksData from '@/data/initial-tasks.json';
-import { realtimeClient } from '@/lib/realtime/client';
+import { getRealtimeClient } from '@/lib/realtime/client';
 
 export default function HomePage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -87,7 +87,7 @@ export default function HomePage() {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const sealed = await res.json();
         if (cancelled) return;
-        const sub = realtimeClient.subscribe(sealed);
+        const sub = getRealtimeClient().subscribe(sealed);
         sub.onChange(() => {
           void loadTasks();
         });
