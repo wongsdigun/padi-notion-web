@@ -14,6 +14,7 @@ import { NewTaskModal } from '@/components/NewTaskModal';
 import { AddLeaveModal } from '@/components/AddLeaveModal';
 import { PasswordGate } from '@/components/PasswordGate';
 import initialTasksData from '@/data/initial-tasks.json';
+import { realtimeClient } from '@/lib/realtime/client';
 
 export default function HomePage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -54,24 +55,53 @@ export default function HomePage() {
   const [newTaskInitialStatus, setNewTaskInitialStatus] = useState<TaskStatus>('Not started');
 
   // Fetch initial tasks (silent background sync)
-  useEffect(() => {
-    async function load() {
-      setDbStatus('syncing');
-      try {
-        const data = await getTasks();
-        if (data && data.length > 0) {
-          setTasks(data);
-        }
-        setDbStatus(getDbStatus());
-      } catch (err) {
-        console.warn('Background tasks sync warning:', err);
-        setDbStatus('offline');
-      } finally {
-        setIsLoading(false);
+  const loadTasks = React.useCallback(async () => {
+    setDbStatus('syncing');
+    try {
+      const data = await getTasks();
+      if (data && data.length > 0) {
+        setTasks(data);
       }
+      setDbStatus(getDbStatus());
+    } catch (err) {
+      console.warn('Background tasks sync warning:', err);
+      setDbStatus('offline');
     }
-    load();
   }, []);
+
+  useEffect(() => {
+    loadTasks().finally(() => setIsLoading(false));
+  }, [loadTasks]);
+
+  // Live updates: Neon Realtime pushes every committed task change, and the board
+  // refetches. If the subscription cannot be established the app keeps working
+  // with the reload button.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let subscription: { unsubscribe: () => void } | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch('/api/realtime/tasks', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const sealed = await res.json();
+        if (cancelled) return;
+        const sub = realtimeClient.subscribe(sealed);
+        sub.onChange(() => {
+          void loadTasks();
+        });
+        subscription = sub;
+      } catch (err) {
+        console.warn('Realtime unavailable, using manual reload:', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      subscription?.unsubscribe();
+    };
+  }, [isAuthenticated, loadTasks]);
 
   // Compute distinct filter options
   const assigneesList = useMemo(() => {

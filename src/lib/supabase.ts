@@ -1,93 +1,59 @@
-import { createClient } from '@supabase/supabase-js';
+// Data client for the Next.js route handlers in src/app/api/*.
+// Historically this module talked to Supabase from the browser; it now calls the
+// server routes, which own the Neon Postgres and Object Storage credentials.
 import { Task, TaskAttachment } from './types';
 import fallbackData from '@/data/initial-tasks.json';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+export const isSupabaseConfigured = true;
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
-
-export const supabase = isSupabaseConfigured
-  ? createClient(supabaseUrl!, supabaseAnonKey!)
-  : null;
-
-// In-memory local cache for dev/demo mode when Supabase isn't connected yet
 let localTasksCache: Task[] = [...(fallbackData as Task[])];
 
-let currentDbStatus: 'connected' | 'syncing' | 'offline' = isSupabaseConfigured ? 'syncing' : 'offline';
+let currentDbStatus: 'connected' | 'syncing' | 'offline' = 'syncing';
 
 export function getDbStatus(): 'connected' | 'syncing' | 'offline' {
   return currentDbStatus;
 }
 
-export async function getTasks(): Promise<Task[]> {
-  if (!isSupabaseConfigured || !supabase) {
-    currentDbStatus = 'offline';
-    return localTasksCache;
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    ...init,
+    headers: init?.body && !(init.body instanceof FormData)
+      ? { 'Content-Type': 'application/json', ...init?.headers }
+      : init?.headers,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${res.statusText} ${detail}`.trim());
   }
+  return (await res.json()) as T;
+}
 
+export async function getTasks(): Promise<Task[]> {
   currentDbStatus = 'syncing';
   try {
-    const fetchPromise = supabase
-      .from('tasks')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    const timeoutPromise = new Promise<{ data: null; error: Error }>((resolve) =>
-      setTimeout(() => resolve({ data: null, error: new Error('Supabase fetch timed out') }), 4000)
-    );
-
-    const { data, error } = (await Promise.race([fetchPromise, timeoutPromise])) as any;
-
-    if (error) {
-      console.warn('Supabase fetch warning, using local cache:', error.message);
-      currentDbStatus = 'offline';
-      return localTasksCache;
-    }
-
-    if (!data || data.length === 0) {
-      currentDbStatus = 'connected';
-      return localTasksCache;
-    }
-
+    const data = await api<Task[]>('/api/tasks', { cache: 'no-store' });
     currentDbStatus = 'connected';
-    localTasksCache = data as Task[];
-    return data as Task[];
+    localTasksCache = data;
+    return data;
   } catch (err) {
-    console.warn('Error reading from Supabase:', err);
+    console.warn('Task fetch warning, using local cache:', (err as Error).message);
     currentDbStatus = 'offline';
     return localTasksCache;
   }
 }
 
 export async function upsertTask(task: Partial<Task> & { id: string }): Promise<Task> {
-  if (!isSupabaseConfigured || !supabase) {
-    currentDbStatus = 'offline';
-    const idx = localTasksCache.findIndex((t) => t.id === task.id);
-    if (idx >= 0) {
-      localTasksCache[idx] = { ...localTasksCache[idx], ...task };
-      return localTasksCache[idx];
-    } else {
-      const newTask = task as Task;
-      localTasksCache.unshift(newTask);
-      return newTask;
-    }
-  }
-
   currentDbStatus = 'syncing';
   try {
-    const { data, error } = await supabase
-      .from('tasks')
-      .upsert(task, { onConflict: 'id' })
-      .select()
-      .single();
-
-    if (error) {
-      currentDbStatus = 'offline';
-      throw error;
-    }
+    const saved = await api<Task>('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify(task),
+    });
+    const idx = localTasksCache.findIndex((t) => t.id === saved.id);
+    if (idx >= 0) localTasksCache[idx] = saved;
+    else localTasksCache.unshift(saved);
     currentDbStatus = 'connected';
-    return data as Task;
+    return saved;
   } catch (err) {
     currentDbStatus = 'offline';
     throw err;
@@ -95,19 +61,10 @@ export async function upsertTask(task: Partial<Task> & { id: string }): Promise<
 }
 
 export async function deleteTask(id: string): Promise<void> {
-  if (!isSupabaseConfigured || !supabase) {
-    currentDbStatus = 'offline';
-    localTasksCache = localTasksCache.filter((t) => t.id !== id);
-    return;
-  }
-
   currentDbStatus = 'syncing';
   try {
-    const { error } = await supabase.from('tasks').delete().eq('id', id);
-    if (error) {
-      currentDbStatus = 'offline';
-      throw error;
-    }
+    await api<{ ok: true }>(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    localTasksCache = localTasksCache.filter((t) => t.id !== id);
     currentDbStatus = 'connected';
   } catch (err) {
     currentDbStatus = 'offline';
@@ -115,50 +72,9 @@ export async function deleteTask(id: string): Promise<void> {
   }
 }
 
-function formatBytes(bytes: number, decimals = 1): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['B', 'KiB', 'MiB', 'GiB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-}
-
 export async function uploadTaskFile(taskId: string, file: File): Promise<TaskAttachment> {
-  const sanitizedName = file.name.replace(/[^\w.-]/g, '_');
-  const path = `${taskId}/${sanitizedName}`;
-
-  if (!isSupabaseConfigured || !supabase) {
-    const localUrl = URL.createObjectURL(file);
-    return {
-      id: crypto.randomUUID(),
-      name: file.name,
-      size: formatBytes(file.size),
-      type: file.type.startsWith('image/') ? 'image' : 'file',
-      url: localUrl,
-    };
-  }
-
-  const { error: uploadError } = await supabase.storage
-    .from('task-attachments')
-    .upload(path, file, {
-      contentType: file.type || 'application/octet-stream',
-      upsert: true,
-    });
-
-  if (uploadError) {
-    throw uploadError;
-  }
-
-  const { data: pubData } = supabase.storage
-    .from('task-attachments')
-    .getPublicUrl(path);
-
-  return {
-    id: crypto.randomUUID(),
-    name: file.name,
-    size: formatBytes(file.size),
-    type: file.type.startsWith('image/') ? 'image' : 'file',
-    url: pubData.publicUrl,
-  };
+  const form = new FormData();
+  form.append('file', file);
+  form.append('taskId', taskId);
+  return api<TaskAttachment>('/api/upload', { method: 'POST', body: form });
 }
