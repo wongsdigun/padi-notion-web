@@ -3,10 +3,20 @@ import { pool, toRowValues } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
+// `date` columns go out as plain YYYY-MM-DD, exactly as Supabase returned them:
+// pg hands back JS Dates, and JSON.stringify would turn those into instants.
+const SELECT_TASKS = `select
+  id, title, status, priority, quarter, wbs, squads, pms, assignees,
+  start_date::text as start_date, end_date::text as end_date,
+  figma_url, prd_url, taiga_url, userflow_url, other_docs, description,
+  parent_id, attachments, created_at, updated_at
+from tasks order by created_at desc`;
+
 export async function GET() {
   try {
-    const { rows } = await pool.query('select * from tasks order by created_at desc');
-    return NextResponse.json(rows);
+    const { rows } = await pool.query(SELECT_TASKS);
+    // Read-only and cross-origin: gr8r-studio, a static viewer, reads this list.
+    return NextResponse.json(rows, { headers: { 'access-control-allow-origin': '*' } });
   } catch (error) {
     console.error('[db] list failed:', (error as Error).message);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });

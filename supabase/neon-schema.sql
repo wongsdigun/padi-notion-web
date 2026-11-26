@@ -48,3 +48,17 @@ create trigger trigger_tasks_updated_at
     before update on tasks
     for each row
     execute function update_updated_at_column();
+
+-- Team members. gr8r-studio (read-only viewer) needs names and roles to map
+-- assignees onto its own member records; nothing in padi's own UI reads it yet.
+create table if not exists members (
+    id uuid primary key default gen_random_uuid(),
+    auth_id uuid,
+    name text not null,
+    email text,
+    role text not null default 'member',
+    squad text,
+    created_at timestamptz default now()
+);
+
+create index if not exists idx_members_name on members(name);
